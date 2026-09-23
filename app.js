@@ -5,13 +5,31 @@
 (function () {
   const DATA = window.SCHEDULE_DATA;
   const TARGET = DATA.meta.targetLoad || 17;
-  const STORAGE_KEY = "duty_schedule_v2_" + DATA.meta.weekStart;
-  const OLD_KEY = "duty_schedule_v1_" + DATA.meta.weekStart;
+  const MONTH_KEY = DATA.meta.monthStart || DATA.meta.weekStart;
+  const STORAGE_KEY = "duty_schedule_v3_" + MONTH_KEY;
+  const OLD_KEYS = [
+    "duty_schedule_v2_" + DATA.meta.weekStart,
+    "duty_schedule_v1_" + DATA.meta.weekStart,
+    "duty_schedule_v2_2026-09-28",
+    "duty_schedule_v1_2026-09-28",
+  ];
   const SHIFT_TIMES_KEY = "duty_shift_times_v1";
   const STAFF_BANDS_KEY = "duty_staff_bands_v1";
   const LEGACY = { early: "early8", late: "late1530", night: "night2330" };
   const DEFAULT_SHIFTS = JSON.parse(JSON.stringify(DATA.shifts));
   const DEFAULT_STAFF_BANDS = Object.fromEntries(DATA.staff.map((p) => [p.id, p.band]));
+  const WEEKS =
+    DATA.weeks && DATA.weeks.length
+      ? DATA.weeks
+      : [
+          {
+            id: "w1",
+            label: DATA.meta.weekStart,
+            start: DATA.days[0].date,
+            end: DATA.days[DATA.days.length - 1].date,
+            dayIndexes: DATA.days.map((_, i) => i),
+          },
+        ];
 
   let SHIFT_MAP = {};
   const BANDS = ["早", "中", "晚", "晚夜", "夜"];
@@ -37,7 +55,22 @@
   let schedule = loadSchedule();
   /** @type {Set<string>} */
   let selected = new Set();
-  let focusDay = 0;
+  let focusWeek = Math.max(
+    0,
+    WEEKS.findIndex((w) => w.start === "2026-09-28")
+  );
+  let focusDay = WEEKS[focusWeek].dayIndexes[0];
+
+  function viewDayIndexes() {
+    return WEEKS[focusWeek].dayIndexes.slice();
+  }
+
+  function setFocusWeek(weekIdx, keepDay) {
+    focusWeek = Math.max(0, Math.min(WEEKS.length - 1, weekIdx));
+    const idxs = viewDayIndexes();
+    if (keepDay && idxs.includes(focusDay)) return;
+    focusDay = idxs[0];
+  }
 
   function normalizeShift(id) {
     if (!id) return null;
@@ -49,7 +82,13 @@
   function loadSchedule() {
     let saved = null;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(OLD_KEY);
+      let raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        for (const k of OLD_KEYS) {
+          raw = localStorage.getItem(k);
+          if (raw) break;
+        }
+      }
       if (raw) saved = JSON.parse(raw);
     } catch (_) {}
     const out = saved && typeof saved === "object" ? saved : {};
@@ -293,10 +332,11 @@
 
   /**
    * 每人每周至少休息 1 天。
-   * 同班段内把休息摊开；人效高的优先在需求较低的那天休。
+   * @param {number[]} dayIndexes 本周在 DATA.days 中的下标
    * @returns {Record<string,string>} staffId -> restDate
    */
-  function pickWeeklyRestDays() {
+  function pickWeeklyRestDays(dayIndexes) {
+    const idxs = dayIndexes || DATA.days.map((_, i) => i);
     const restByStaff = {};
     const byBand = { 早: [], 晚: [], 夜: [] };
     DATA.staff.forEach((p) => {
@@ -306,12 +346,11 @@
 
     Object.keys(byBand).forEach((band) => {
       const people = byBand[band].slice().sort((a, b) => b.capacity - a.capacity);
-      const restCount = DATA.days.map(() => 0);
+      const restCount = Object.fromEntries(idxs.map((i) => [i, 0]));
       people.forEach((p) => {
-        let bestDay = 0;
+        let bestDay = idxs[0];
         let bestScore = Infinity;
-        DATA.days.forEach((_, dayIdx) => {
-          // 优先休息人数少的那天，其次该班段需求更低的那天
+        idxs.forEach((dayIdx) => {
           const score = restCount[dayIdx] * 100000 + bandPeakDemand(dayIdx, band);
           if (score < bestScore) {
             bestScore = score;
@@ -325,9 +364,10 @@
     return restByStaff;
   }
 
-  function autoFillWeek() {
-    const restByStaff = pickWeeklyRestDays();
-    DATA.days.forEach((d, dayIdx) => {
+  function autoFillDays(dayIndexes) {
+    const restByStaff = pickWeeklyRestDays(dayIndexes);
+    dayIndexes.forEach((dayIdx) => {
+      const d = DATA.days[dayIdx];
       const working = DATA.staff.filter((p) => restByStaff[p.id] !== d.date);
       const assign = optimizeDayAssignments(dayIdx, working);
       DATA.staff.forEach((p) => {
@@ -335,6 +375,14 @@
         else setShift(p.id, d.date, assign[p.id] || null);
       });
     });
+  }
+
+  function autoFillWeek() {
+    autoFillDays(viewDayIndexes());
+  }
+
+  function autoFillMonth() {
+    WEEKS.forEach((w) => autoFillDays(w.dayIndexes));
   }
 
   function pad2(n) {
@@ -722,12 +770,23 @@
       `<button type="button" class="adj-btn" id="adjustStaff" title="指定每位客服早班 / 晚班 / 夜班">人员调整</button>`;
   }
 
+  function renderWeekPick() {
+    const el = document.getElementById("weekPick");
+    if (!el) return;
+    el.innerHTML = WEEKS.map((w, i) => {
+      const on = i === focusWeek ? " on" : "";
+      return `<button type="button" data-week="${i}" class="${on}">第${i + 1}周 ${w.label}</button>`;
+    }).join("");
+  }
+
   function renderCal() {
     const table = document.getElementById("cal");
+    const idxs = viewDayIndexes();
     let head1 =
       '<tr><th class="sticky-name">人员</th>' +
-      DATA.days
-        .map((d) => {
+      idxs
+        .map((i) => {
+          const d = DATA.days[i];
           const dayNum = d.date.slice(8);
           return `<th>${Number(dayNum)}<br/><span style="font-weight:400">周${d.weekday}</span></th>`;
         })
@@ -736,8 +795,8 @@
 
     let head2 =
       '<tr class="demand"><th class="sticky-name">需求/已排</th>' +
-      DATA.days
-        .map((_, i) => {
+      idxs
+        .map((i) => {
           const st = dayScheduled(i);
           const cls = st.headcount < st.demandHc ? "short" : "ok";
           return `<th class="${cls}">${st.demandHc}/${st.headcount}</th>`;
@@ -748,7 +807,8 @@
     let body = "";
     DATA.staff.forEach((p) => {
       body += `<tr><td class="sticky-name"><div class="name">${p.name}</div><div class="meta">${p.dailyAvg || Math.round(p.histEff * 7.5)}单/天 · ${p.histEff}单/时 · 休${p.restQuota}天 · ${p.band}${p.tier ? " · " + p.tier : ""}</div></td>`;
-      DATA.days.forEach((d) => {
+      idxs.forEach((i) => {
+        const d = DATA.days[i];
         const sh = schedule[p.id]?.[d.date] || null;
         const sel = selected.has(keyOf(p.id, d.date)) ? " selected" : "";
         const title = sh === "rest" ? "休息" : SHIFT_MAP[sh]?.label || "未排";
@@ -766,8 +826,9 @@
 
   function renderDayPick() {
     const el = document.getElementById("dayPick");
-    el.innerHTML = DATA.days
-      .map((d, i) => {
+    el.innerHTML = viewDayIndexes()
+      .map((i) => {
+        const d = DATA.days[i];
         const on = i === focusDay ? " on" : "";
         return `<button type="button" data-day="${i}" class="${on}">${d.date.slice(5)} 周${d.weekday}</button>`;
       })
@@ -868,6 +929,7 @@
 
   function renderAll() {
     closeShiftPicker();
+    renderWeekPick();
     renderCal();
     renderDayPick();
     renderHour();
@@ -883,7 +945,7 @@
     const staffId = cell.dataset.staff;
     const date = cell.dataset.date;
     const di = DATA.days.findIndex((d) => d.date === date);
-    if (di >= 0) focusDay = di;
+    if (di >= 0) syncFocusFromDay(di);
 
     if (e.shiftKey || e.metaKey) {
       e.preventDefault();
@@ -923,7 +985,7 @@
     const val = opt.dataset.value || null;
     setShift(staffId, date, val);
     const di = DATA.days.findIndex((d) => d.date === date);
-    if (di >= 0) focusDay = di;
+    if (di >= 0) syncFocusFromDay(di);
     closeShiftPicker();
     renderAll();
   });
@@ -948,10 +1010,25 @@
     renderAll();
   });
 
+  function syncFocusFromDay(dayIdx) {
+    if (dayIdx < 0) return;
+    focusDay = dayIdx;
+    const wi = WEEKS.findIndex((w) => w.dayIndexes.includes(dayIdx));
+    if (wi >= 0) focusWeek = wi;
+  }
+
+  document.getElementById("weekPick").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-week]");
+    if (!btn) return;
+    setFocusWeek(Number(btn.dataset.week), false);
+    selected.clear();
+    renderAll();
+  });
+
   document.getElementById("dayPick").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-day]");
     if (!btn) return;
-    focusDay = Number(btn.dataset.day);
+    syncFocusFromDay(Number(btn.dataset.day));
     renderAll();
   });
 
@@ -970,7 +1047,8 @@
   });
 
   document.getElementById("autoFill").addEventListener("click", () => {
-    if (!confirm("将按「缺口最小」重排本周：每人只在所属早/晚/夜班段内排班，且每周至少休息 1 天（覆盖现有排班），继续？")) return;
+    const w = WEEKS[focusWeek];
+    if (!confirm(`将重排第 ${focusWeek + 1} 周（${w.label}）：按缺口最小，不跨早/晚/夜，每人至少休息 1 天，继续？`)) return;
     const btn = document.getElementById("autoFill");
     btn.disabled = true;
     btn.textContent = "排班中…";
@@ -982,6 +1060,23 @@
       } finally {
         btn.disabled = false;
         btn.textContent = "一键排班";
+      }
+    }, 20);
+  });
+
+  document.getElementById("autoFillMonth").addEventListener("click", () => {
+    if (!confirm("将重排整月四周：每周每人至少休息 1 天，覆盖现有排班，继续？")) return;
+    const btn = document.getElementById("autoFillMonth");
+    btn.disabled = true;
+    btn.textContent = "排班中…";
+    setTimeout(() => {
+      try {
+        autoFillMonth();
+        selected.clear();
+        renderAll();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "整月排班";
       }
     }, 20);
   });
@@ -1042,9 +1137,10 @@
   });
 
   document.getElementById("clearWeek").addEventListener("click", () => {
-    if (!confirm("清空本周全部排班？")) return;
+    const w = WEEKS[focusWeek];
+    if (!confirm(`清空第 ${focusWeek + 1} 周（${w.label}）全部排班？`)) return;
     DATA.staff.forEach((p) => {
-      DATA.days.forEach((d) => setShift(p.id, d.date, null));
+      w.dayIndexes.forEach((i) => setShift(p.id, DATA.days[i].date, null));
     });
     selected.clear();
     renderAll();
@@ -1052,7 +1148,9 @@
 
   document.getElementById("exportJson").addEventListener("click", () => {
     const out = {
-      weekStart: DATA.meta.weekStart,
+      monthStart: DATA.meta.monthStart || DATA.meta.weekStart,
+      monthEnd: DATA.meta.monthEnd,
+      weeks: WEEKS,
       shifts: DATA.shifts,
       schedule,
       advice: DATA.days.map((_, i) => {
@@ -1070,7 +1168,7 @@
     const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "duty-schedule-" + DATA.meta.weekStart + ".json";
+    a.download = "duty-schedule-" + (DATA.meta.monthStart || DATA.meta.weekStart) + ".json";
     a.click();
   });
 

@@ -387,24 +387,36 @@
       padding: 3px 7px; cursor: pointer; font: inherit; font-size: 11px;
     }
     .day-pick button.on { background: #111827; color: #fff; border-color: #111827; }
+    .week-pick {
+      display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+    }
+    .week-pick button {
+      font: inherit; height: 28px; border-radius: 6px; border: 1px solid var(--line);
+      padding: 0 10px; background: #fff; cursor: pointer; color: var(--ink); font-size: 12px;
+    }
+    .week-pick button.on {
+      background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600;
+    }
   </style>
 </head>
 <body>
   <header class="top">
     <div class="top-row">
       <div>
-        <h1>排班日历</h1>
-        <p class="hint">点击格子下拉选择班次；Shift/⌘ 多选后可填充；右键清除。「一键排班」按缺口最小：不跨早/晚/夜，每人每周至少休息 1 天。</p>
+        <h1>排班日历 · 整月</h1>
+        <p class="hint">09-21 ~ 10-18 共四周。切换上方周次查看；「一键排班」排当前周，「整月排班」排四周。每人每周至少休息 1 天。</p>
       </div>
       <div class="actions">
         <select id="fillShift"></select>
         <button class="primary" id="fillSelected">填充选中</button>
-        <button class="primary" id="autoFill" title="按缺口最小贪心，重排本周全部格子">一键排班</button>
+        <button class="primary" id="autoFill" title="只重排当前周">一键排班</button>
+        <button class="primary" id="autoFillMonth" title="四周全部重排，每周至少休息 1 天">整月排班</button>
         <button class="ghost" id="clearSelected">清除选中</button>
         <button class="ghost" id="clearWeek">清空本周</button>
         <button class="ghost" id="exportJson">导出 JSON</button>
       </div>
     </div>
+    <div class="week-pick" id="weekPick"></div>
     <div class="legend" id="legend"></div>
   </header>
 
