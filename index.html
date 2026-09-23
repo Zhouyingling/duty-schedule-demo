@@ -128,20 +128,61 @@
     }
     .staff-toolbar .cnt { color: var(--muted); font-size: 12px; white-space: nowrap; }
     .staff-edit-list { max-height: 52vh; overflow: auto; }
+    .shift-picker button.leave { background: #f2c9c9; color: #8a3030; }
+    .shift-picker button.swap { background: #e8eef8; color: #3d5573; }
+
+    .month-cal {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+    .month-cal .hd {
+      text-align: center; font-size: 11px; color: var(--muted); padding: 2px 0;
+    }
+    .month-cal button {
+      border: 1px solid var(--line); background: #fff; border-radius: 6px;
+      padding: 6px 2px; cursor: pointer; font: inherit; font-size: 11px;
+      line-height: 1.2;
+    }
+    .month-cal button .d { font-weight: 700; display: block; }
+    .month-cal button .r { color: var(--muted); font-size: 10px; }
+    .month-cal button.on {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    .month-cal button.on .r { color: rgba(255,255,255,0.85); }
+    .month-cal button.short:not(.on) { border-color: #e8a0a0; }
+    .month-title {
+      font-weight: 700; font-size: 13px; margin-bottom: 6px;
+    }
+
     .staff-edit-row {
       display: grid;
-      grid-template-columns: 1fr 96px;
-      gap: 8px;
+      grid-template-columns: minmax(90px, 1.2fr) 64px 88px 72px 1fr 28px;
+      gap: 6px;
       align-items: center;
       padding: 6px 0;
       border-bottom: 1px solid var(--line);
     }
+    .staff-edit-row.excluded { opacity: 0.55; }
     .staff-edit-row .n { font-weight: 600; color: var(--ink); }
     .staff-edit-row .m { font-size: 11px; color: var(--muted); margin-top: 2px; }
-    .staff-edit-row select {
+    .staff-edit-row select,
+    .staff-edit-row input[type="text"] {
       font: inherit; height: 30px; border: 1px solid var(--line);
-      border-radius: 6px; padding: 0 6px; background: #fff;
+      border-radius: 6px; padding: 0 6px; background: #fff; width: 100%;
     }
+    .staff-edit-row .leave-inp { font-size: 11px; }
+    .staff-edit-row .chk {
+      display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted);
+      white-space: nowrap;
+    }
+    .staff-edit-row .del-staff {
+      height: 28px; width: 28px; border: 0; background: transparent;
+      color: var(--muted); cursor: pointer; font-size: 16px;
+    }
+    .staff-edit-row .del-staff:hover { color: var(--gap); }
+    .modal.wide { width: min(920px, 100%); }
     .leg {
       display: inline-flex; align-items: center; gap: 6px;
     }
@@ -154,12 +195,13 @@
     .chip.band-late { background: var(--late); color: var(--late-ink); }
     .chip.band-night { background: var(--night); color: var(--night-ink); }
     .chip.rest { background: var(--rest); color: var(--rest-ink); }
+    .chip.leave { background: #f2c9c9; color: #8a3030; }
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #c4c9d2; display: inline-block; }
     .leave-mark { color: var(--leave); font-weight: 700; }
 
     .layout {
       display: grid;
-      grid-template-columns: 300px 1fr;
+      grid-template-columns: 280px 1fr;
       gap: 12px;
       padding: 12px 16px 24px;
       align-items: start;
@@ -173,7 +215,7 @@
       border: 1px solid var(--line);
       border-radius: 10px;
       overflow: auto;
-      max-height: calc(100vh - 140px);
+      max-height: calc(100vh - 160px);
     }
     table.cal {
       border-collapse: separate;
@@ -192,15 +234,16 @@
       background: #fafafa;
       font-weight: 500;
       color: var(--muted);
-      font-size: 11px;
-      height: 28px;
+      font-size: 10px;
+      height: 26px;
+      min-width: 36px;
     }
     .cal thead tr.demand th {
-      top: 28px;
-      height: 32px;
+      top: 26px;
+      height: 28px;
       font-variant-numeric: tabular-nums;
       font-weight: 700;
-      font-size: 12px;
+      font-size: 10px;
       color: var(--ink);
     }
     .cal thead tr.demand th.short { color: var(--gap); }
@@ -209,19 +252,32 @@
       position: sticky; left: 0; z-index: 2;
       background: #fff;
       text-align: left;
-      padding: 8px 10px;
-      min-width: 128px;
+      padding: 4px 8px;
+      min-width: 108px;
+      max-width: 128px;
       border-right: 1px solid var(--line);
     }
     .cal thead .sticky-name { z-index: 4; background: #fafafa; }
-    .name { font-weight: 600; color: var(--ink); }
-    .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .cal .sticky-rest {
+      position: sticky; right: 0; z-index: 2;
+      background: #fafafa;
+      min-width: 52px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      font-size: 12px;
+      border-left: 1px solid var(--line);
+    }
+    .cal thead .sticky-rest { z-index: 4; }
+    .cal .sticky-rest.short { color: var(--gap); }
+    .cal .sticky-rest.ok { color: var(--ok); }
+    .name { font-weight: 600; color: var(--ink); font-size: 12px; }
+    .meta { font-size: 10px; color: var(--muted); margin-top: 1px; }
     .cell {
-      width: 76px; height: 44px;
+      width: 40px; height: 36px;
       cursor: pointer; user-select: none;
       background: #fff;
       position: relative;
-      padding: 4px;
+      padding: 2px;
     }
     .cell:hover { outline: 2px solid #b7c9dc; outline-offset: -2px; }
     .cell.selected { background: #eef2f7; }
@@ -232,24 +288,24 @@
       width: 100%;
       height: 100%;
       border: 0;
-      border-radius: 6px;
+      border-radius: 4px;
       font: inherit;
       font-weight: 700;
-      font-size: 13px;
+      font-size: 11px;
       cursor: pointer;
-      padding: 0 14px 0 4px;
+      padding: 0 8px 0 2px;
       position: relative;
     }
     .cell-shift::after {
       content: "";
       position: absolute;
-      right: 6px;
+      right: 3px;
       top: 50%;
       width: 0; height: 0;
-      border-left: 3.5px solid transparent;
-      border-right: 3.5px solid transparent;
-      border-top: 4.5px solid currentColor;
-      opacity: 0.55;
+      border-left: 2.5px solid transparent;
+      border-right: 2.5px solid transparent;
+      border-top: 3.5px solid currentColor;
+      opacity: 0.5;
       transform: translateY(-35%);
     }
     .cell-shift.empty {
@@ -261,6 +317,7 @@
     .cell-shift.band-late { background: var(--late); color: var(--late-ink); }
     .cell-shift.band-night { background: var(--night); color: var(--night-ink); }
     .cell-shift.rest { background: var(--rest); color: var(--rest-ink); }
+    .cell-shift.leave { background: #f2c9c9; color: #8a3030; }
 
     .shift-picker {
       position: fixed;
@@ -404,19 +461,17 @@
     <div class="top-row">
       <div>
         <h1>排班日历 · 整月</h1>
-        <p class="hint">09-21 ~ 10-18 共四周。切换上方周次查看；「一键排班」排当前周，「整月排班」排四周。每人每周至少休息 1 天。</p>
+        <p class="hint">09-21～10-18 整月直出。每周常规休息 4 天；调休可自动对调；晚→夜 / 夜→次日早会提示。左侧月历点日期看当日需求。</p>
       </div>
       <div class="actions">
         <select id="fillShift"></select>
         <button class="primary" id="fillSelected">填充选中</button>
-        <button class="primary" id="autoFill" title="只重排当前周">一键排班</button>
-        <button class="primary" id="autoFillMonth" title="四周全部重排，每周至少休息 1 天">整月排班</button>
+        <button class="primary" id="autoFillMonth" title="整月自动排班，每周休息 4 天">整月排班</button>
         <button class="ghost" id="clearSelected">清除选中</button>
-        <button class="ghost" id="clearWeek">清空本周</button>
+        <button class="ghost" id="clearMonth">清空整月</button>
         <button class="ghost" id="exportJson">导出 JSON</button>
       </div>
     </div>
-    <div class="week-pick" id="weekPick"></div>
     <div class="legend" id="legend"></div>
   </header>
 
@@ -435,11 +490,12 @@
   </div>
 
   <div class="modal-mask" id="staffModal" hidden>
-    <div class="modal" role="dialog" aria-labelledby="staffModalTitle">
-      <h3 id="staffModalTitle">人员班段</h3>
-      <p class="modal-tip">指定每位客服属于早班、晚班或夜班；一键排班只会在对应班段内排细时间段。</p>
+    <div class="modal wide" role="dialog" aria-labelledby="staffModalTitle">
+      <h3 id="staffModalTitle">人员调整</h3>
+      <p class="modal-tip">班段 + 子班次偏好；请假日期用逗号分隔（如 09-25,10-01）；勾选「不排」可排除。可添加客服。</p>
       <div class="staff-toolbar">
         <input type="search" id="staffFilter" placeholder="搜索姓名 / 站点 / 组别" />
+        <button type="button" class="shift-add" id="staffAdd" style="margin:0">+ 添加客服</button>
         <span class="cnt" id="staffBandCount"></span>
       </div>
       <div class="staff-edit-list" id="staffEditList"></div>
@@ -456,9 +512,10 @@
   <div class="layout">
     <aside class="side">
       <section class="card">
-        <div class="day-pick" id="dayPick"></div>
+        <div class="month-title" id="monthTitle"></div>
+        <div class="month-cal" id="monthCal"></div>
         <div class="tabs">
-          <button type="button" class="on" data-tab="hour">小时格子</button>
+          <button type="button" class="on" data-tab="hour">小时需求</button>
           <button type="button" data-tab="roster">排班名单</button>
           <button type="button" data-tab="eff">历史人效</button>
         </div>

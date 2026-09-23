@@ -6,8 +6,9 @@
   const DATA = window.SCHEDULE_DATA;
   const TARGET = DATA.meta.targetLoad || 17;
   const MONTH_KEY = DATA.meta.monthStart || DATA.meta.weekStart;
-  const STORAGE_KEY = "duty_schedule_v3_" + MONTH_KEY;
+  const STORAGE_KEY = "duty_schedule_v4_" + MONTH_KEY;
   const OLD_KEYS = [
+    "duty_schedule_v3_" + MONTH_KEY,
     "duty_schedule_v2_" + DATA.meta.weekStart,
     "duty_schedule_v1_" + DATA.meta.weekStart,
     "duty_schedule_v2_2026-09-28",
@@ -15,9 +16,12 @@
   ];
   const SHIFT_TIMES_KEY = "duty_shift_times_v1";
   const STAFF_BANDS_KEY = "duty_staff_bands_v1";
+  const STAFF_META_KEY = "duty_staff_meta_v1";
   const LEGACY = { early: "early8", late: "late1530", night: "night2330" };
   const DEFAULT_SHIFTS = JSON.parse(JSON.stringify(DATA.shifts));
-  const DEFAULT_STAFF_BANDS = Object.fromEntries(DATA.staff.map((p) => [p.id, p.band]));
+  const DEFAULT_STAFF = JSON.parse(JSON.stringify(DATA.staff));
+  const DEFAULT_STAFF_BANDS = Object.fromEntries(DEFAULT_STAFF.map((p) => [p.id, p.band]));
+  const REST_TARGET_WEEK = 4;
   const WEEKS =
     DATA.weeks && DATA.weeks.length
       ? DATA.weeks
@@ -48,35 +52,48 @@
     });
   }
 
+  function activeStaff() {
+    return DATA.staff.filter((p) => !p.excluded);
+  }
+
+  function monthRestTarget() {
+    return REST_TARGET_WEEK * WEEKS.length;
+  }
+
   loadShiftCatalog();
-  loadStaffBands();
+  loadStaffMeta();
   sortStaff();
   /** @type {Record<string, Record<string, string|null>>} */
   let schedule = loadSchedule();
+  syncLeaveIntoSchedule();
   /** @type {Set<string>} */
   let selected = new Set();
-  let focusWeek = Math.max(
+  let focusDay = Math.max(
     0,
-    WEEKS.findIndex((w) => w.start === "2026-09-28")
+    DATA.days.findIndex((d) => d.date === "2026-09-28")
   );
-  let focusDay = WEEKS[focusWeek].dayIndexes[0];
+  if (focusDay < 0) focusDay = 0;
 
   function viewDayIndexes() {
-    return WEEKS[focusWeek].dayIndexes.slice();
-  }
-
-  function setFocusWeek(weekIdx, keepDay) {
-    focusWeek = Math.max(0, Math.min(WEEKS.length - 1, weekIdx));
-    const idxs = viewDayIndexes();
-    if (keepDay && idxs.includes(focusDay)) return;
-    focusDay = idxs[0];
+    return DATA.days.map((_, i) => i);
   }
 
   function normalizeShift(id) {
     if (!id) return null;
     if (id === "rest") return "rest";
+    if (id === "leave") return "leave";
     if (LEGACY[id]) return LEGACY[id];
     return SHIFT_MAP[id] ? id : null;
+  }
+
+  function isWorkShift(id) {
+    const sh = normalizeShift(id);
+    return Boolean(sh && SHIFT_MAP[sh]);
+  }
+
+  function isRestLike(id) {
+    const sh = normalizeShift(id);
+    return sh === "rest" || sh === "leave";
   }
 
   function loadSchedule() {
@@ -107,8 +124,10 @@
   }
 
   function avgCapacity() {
-    const sum = DATA.staff.reduce((s, p) => s + p.capacity, 0);
-    return sum / DATA.staff.length;
+    const pool = activeStaff();
+    if (!pool.length) return 1;
+    const sum = pool.reduce((s, p) => s + p.capacity, 0);
+    return sum / pool.length;
   }
 
   function peakRequiredForHours(dayIdx, hours) {
@@ -151,9 +170,9 @@
     });
 
     const supply = new Array(24).fill(0);
-    DATA.staff.forEach((p) => {
+    activeStaff().forEach((p) => {
       const sh = normalizeShift(schedule[p.id]?.[date]);
-      if (!sh || !SHIFT_MAP[sh]) return;
+      if (!sh || !SHIFT_MAP[sh]) return; // leave / rest 不计产能
       const def = SHIFT_MAP[sh];
       headcount += 1;
       capacity += p.capacity;
@@ -200,7 +219,6 @@
     const needMoreCap = Math.max(0, st.worstGapCap);
     const suggestPeople = needMoreCap <= 0 ? 0 : Math.ceil(needMoreCap / avgCap);
 
-    // 按大班给建议（避免 10 个细班次刷屏）
     const bandTips = ["早", "中", "晚", "夜"].map((band) => {
       const hours = bandHours(band);
       const peakReq = peakRequiredForHours(dayIdx, hours);
@@ -217,6 +235,129 @@
   function setShift(staffId, date, shiftId) {
     if (!schedule[staffId]) schedule[staffId] = {};
     schedule[staffId][date] = normalizeShift(shiftId);
+  }
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function parseClock(str) {
+    const m = String(str || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return { h, min };
+  }
+
+  function formatClock(h, min) {
+    return pad2(h) + ":" + pad2(min);
+  }
+
+  function clocksFromLabel(label) {
+    const m = String(label || "").match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    return {
+      start: formatClock(Number(m[1]), Number(m[2])),
+      end: formatClock(Number(m[3]), Number(m[4])),
+    };
+  }
+
+  /** 班次起止相对当日 0 点的分钟；跨夜则 endMin > 24*60 */
+  function shiftMinuteRange(shiftId) {
+    const def = SHIFT_MAP[normalizeShift(shiftId)];
+    if (!def) return null;
+    const c = clocksFromLabel(def.label);
+    if (!c) return null;
+    const a = parseClock(c.start);
+    const b = parseClock(c.end);
+    if (!a || !b) return null;
+    let startMin = a.h * 60 + a.min;
+    let endMin = b.h * 60 + b.min;
+    if (endMin <= startMin) endMin += 24 * 60;
+    return { startMin, endMin, band: def.band };
+  }
+
+  function dayIndexOf(date) {
+    return DATA.days.findIndex((d) => d.date === date);
+  }
+
+  /** 相邻上班班次衔接检查 */
+  function checkShiftTransition(staffId, date, newShiftId) {
+    const next = normalizeShift(newShiftId);
+    if (!isWorkShift(next)) return {};
+    const di = dayIndexOf(date);
+    if (di < 0) return {};
+    const nextRange = shiftMinuteRange(next);
+    if (!nextRange) return {};
+
+    function findNeighbor(dir) {
+      for (let i = di + dir; i >= 0 && i < DATA.days.length; i += dir) {
+        const d = DATA.days[i].date;
+        const sh = normalizeShift(schedule[staffId]?.[d]);
+        if (isWorkShift(sh)) return { date: d, dayIdx: i, shiftId: sh, range: shiftMinuteRange(sh) };
+        if (sh === null) continue;
+        // rest / leave：跳过继续找相邻上班日
+      }
+      return null;
+    }
+
+    const prev = findNeighbor(-1);
+    const after = findNeighbor(1);
+    let block = "";
+    let warn = "";
+
+    function gapHours(earlier, later, dayDelta) {
+      // earlier 在 earlierDay，later 在 laterDay；dayDelta = laterDay - earlierDay
+      const endAbs = earlier.endMin;
+      const startAbs = later.startMin + dayDelta * 24 * 60;
+      return (startAbs - endAbs) / 60;
+    }
+
+    if (prev && prev.range) {
+      const dayDelta = di - prev.dayIdx;
+      const gap = gapHours(prev.range, nextRange, dayDelta);
+      const prevBand = prev.range.band;
+      const nextBand = nextRange.band;
+      if ((prevBand === "晚" || prevBand === "晚夜") && nextBand === "夜" && gap < 8) {
+        block = "衔接冲突：晚/晚夜后紧接夜班，间隔不足，无法安排。";
+      } else if (prevBand === "夜" && nextBand === "早") {
+        block = "衔接冲突：夜班后不能排次日早班。";
+      } else if (gap <= 8 && !block) {
+        warn = `与上一班间隔仅 ${gap.toFixed(1)} 小时（≤8h），休息可能不足。`;
+      }
+    }
+
+    if (!block && after && after.range) {
+      const dayDelta = after.dayIdx - di;
+      const gap = gapHours(nextRange, after.range, dayDelta);
+      const prevBand = nextRange.band;
+      const nextBand = after.range.band;
+      if ((prevBand === "晚" || prevBand === "晚夜") && nextBand === "夜" && gap < 8) {
+        block = "衔接冲突：晚/晚夜后紧接夜班，间隔不足，无法安排。";
+      } else if (prevBand === "夜" && nextBand === "早") {
+        block = "衔接冲突：夜班后不能排次日早班。";
+      } else if (gap <= 8 && !warn) {
+        warn = `与下一班间隔仅 ${gap.toFixed(1)} 小时（≤8h），休息可能不足。`;
+      }
+    }
+
+    return { block, warn };
+  }
+
+  function assignShift(staffId, date, shiftId, opts) {
+    opts = opts || {};
+    const next = normalizeShift(shiftId);
+    if (!opts.skipCheck && isWorkShift(next)) {
+      const check = checkShiftTransition(staffId, date, next);
+      if (check.block) {
+        alert(check.block);
+        return false;
+      }
+      if (check.warn && !confirm(check.warn + "\n仍要继续？")) return false;
+    }
+    setShift(staffId, date, next);
+    return true;
   }
 
   /** 计算某日供给相对需求的缺口指标 */
@@ -239,7 +380,6 @@
       return DATA.shifts.filter((s) => s.band === "早");
     }
     if (band === "晚") {
-      // 晚班池：中12 + 晚14:30–18:30（含晚夜）
       return DATA.shifts.filter((s) => s.band === "中" || s.band === "晚" || s.band === "晚夜");
     }
     if (band === "夜") {
@@ -250,18 +390,22 @@
 
   /**
    * 单日缺口最小贪心：只在客服所属早/晚/夜班段内选细时间段；
-   * 优先压最紧小时，其次压全天正缺口之和。
-   * @param {typeof DATA.staff} [staffPool] 当日可排人员（已排除休息）
+   * 优先压最紧小时，其次压全天正缺口之和；偏好子班次有轻微加分。
    */
   function optimizeDayAssignments(dayIdx, staffPool) {
-    const pool = staffPool || DATA.staff;
+    const pool = staffPool || activeStaff();
     const req = DATA.days[dayIdx].required;
     const supply = new Array(24).fill(0);
     const remaining = pool
       .slice()
       .sort((a, b) => b.capacity - a.capacity)
-      .map((p) => ({ id: p.id, band: p.band, capacity: p.capacity }));
-    const result = {}; // staffId -> shiftId
+      .map((p) => ({
+        id: p.id,
+        band: p.band,
+        capacity: p.capacity,
+        preferredShift: p.preferredShift || null,
+      }));
+    const result = {};
 
     function pickBestFor(p, m0) {
       const cands = shiftsForBand(p.band);
@@ -274,7 +418,8 @@
         const m = gapMetrics(trial, req);
         const dSum = m0.sumGap - m.sumGap;
         const dMax = m0.maxGap - m.maxGap;
-        const score = dMax * 3 + dSum;
+        let score = dMax * 3 + dSum;
+        if (p.preferredShift && shift.id === p.preferredShift) score += 0.35;
         if (!best || score > best.score + 1e-9) {
           best = { shiftId: shift.id, hours: shift.hours, score, dSum, dMax };
         }
@@ -304,11 +449,39 @@
       remaining.splice(best.i, 1);
     }
 
-    // 未排上的人：仍只在本人班段内挂到贡献最大的细班次
     remaining.forEach((p) => {
       const m0 = gapMetrics(supply, req);
       const pick = pickBestFor(p, m0);
       if (!pick) return;
+      // 偏好班次若贡献不明显变差则采用
+      if (p.preferredShift) {
+        const pref = SHIFT_MAP[p.preferredShift];
+        const allowed = shiftsForBand(p.band).some((s) => s.id === p.preferredShift);
+        if (pref && allowed) {
+          const trial = supply.slice();
+          pref.hours.forEach((h) => {
+            trial[h] += p.capacity;
+          });
+          const mPref = gapMetrics(trial, req);
+          const mOpt = gapMetrics(
+            (() => {
+              const t = supply.slice();
+              pick.hours.forEach((h) => {
+                t[h] += p.capacity;
+              });
+              return t;
+            })(),
+            req
+          );
+          if (mPref.maxGap <= mOpt.maxGap + 0.3 && mPref.sumGap <= mOpt.sumGap + 0.8) {
+            pref.hours.forEach((h) => {
+              supply[h] += p.capacity;
+            });
+            result[p.id] = p.preferredShift;
+            return;
+          }
+        }
+      }
       pick.hours.forEach((h) => {
         supply[h] += p.capacity;
       });
@@ -330,16 +503,21 @@
     return peak;
   }
 
+  function staffLeaveDatesInWeek(p, dayIndexes) {
+    const leaveSet = new Set(p.leaveDates || []);
+    return dayIndexes.map((i) => DATA.days[i].date).filter((d) => leaveSet.has(d));
+  }
+
   /**
-   * 每人每周至少休息 1 天。
-   * @param {number[]} dayIndexes 本周在 DATA.days 中的下标
-   * @returns {Record<string,string>} staffId -> restDate
+   * 每人每周休息 4 天（请假日优先计入）。
+   * @param {number[]} dayIndexes
+   * @returns {Record<string, string[]>} staffId -> rest dates（含 leave）
    */
   function pickWeeklyRestDays(dayIndexes) {
     const idxs = dayIndexes || DATA.days.map((_, i) => i);
     const restByStaff = {};
     const byBand = { 早: [], 晚: [], 夜: [] };
-    DATA.staff.forEach((p) => {
+    activeStaff().forEach((p) => {
       if (byBand[p.band]) byBand[p.band].push(p);
       else byBand[p.band] = [p];
     });
@@ -347,68 +525,77 @@
     Object.keys(byBand).forEach((band) => {
       const people = byBand[band].slice().sort((a, b) => b.capacity - a.capacity);
       const restCount = Object.fromEntries(idxs.map((i) => [i, 0]));
+
       people.forEach((p) => {
-        let bestDay = idxs[0];
-        let bestScore = Infinity;
-        idxs.forEach((dayIdx) => {
-          const score = restCount[dayIdx] * 100000 + bandPeakDemand(dayIdx, band);
-          if (score < bestScore) {
-            bestScore = score;
-            bestDay = dayIdx;
-          }
+        const forced = staffLeaveDatesInWeek(p, idxs);
+        const picked = new Set(forced);
+        forced.forEach((date) => {
+          const di = dayIndexOf(date);
+          if (di >= 0 && restCount[di] != null) restCount[di] += 1;
         });
-        restByStaff[p.id] = DATA.days[bestDay].date;
-        restCount[bestDay] += 1;
+
+        const need = Math.max(0, REST_TARGET_WEEK - picked.size);
+        for (let n = 0; n < need; n++) {
+          let bestDay = null;
+          let bestScore = Infinity;
+          idxs.forEach((dayIdx) => {
+            const date = DATA.days[dayIdx].date;
+            if (picked.has(date)) return;
+            // 高产能优先低需求日；同时分散休息人数
+            const score =
+              restCount[dayIdx] * 100000 + bandPeakDemand(dayIdx, band) - p.capacity * 0.01;
+            if (score < bestScore) {
+              bestScore = score;
+              bestDay = dayIdx;
+            }
+          });
+          if (bestDay == null) break;
+          picked.add(DATA.days[bestDay].date);
+          restCount[bestDay] += 1;
+        }
+        restByStaff[p.id] = [...picked];
       });
     });
     return restByStaff;
   }
 
-  function autoFillDays(dayIndexes) {
-    const restByStaff = pickWeeklyRestDays(dayIndexes);
-    dayIndexes.forEach((dayIdx) => {
-      const d = DATA.days[dayIdx];
-      const working = DATA.staff.filter((p) => restByStaff[p.id] !== d.date);
-      const assign = optimizeDayAssignments(dayIdx, working);
-      DATA.staff.forEach((p) => {
-        if (restByStaff[p.id] === d.date) setShift(p.id, d.date, "rest");
-        else setShift(p.id, d.date, assign[p.id] || null);
-      });
-    });
+  function defaultShiftForStaff(p) {
+    if (p.preferredShift && SHIFT_MAP[p.preferredShift]) {
+      const allowed = shiftsForBand(p.band).some((s) => s.id === p.preferredShift);
+      if (allowed) return p.preferredShift;
+    }
+    const cands = shiftsForBand(p.band);
+    return cands[0] ? cands[0].id : null;
   }
 
-  function autoFillWeek() {
-    autoFillDays(viewDayIndexes());
+  function autoFillDays(dayIndexes) {
+    const pool = activeStaff();
+    const restByStaff = pickWeeklyRestDays(dayIndexes);
+    const leaveSets = Object.fromEntries(pool.map((p) => [p.id, new Set(p.leaveDates || [])]));
+    const restDates = {};
+    pool.forEach((p) => {
+      restDates[p.id] = new Set(restByStaff[p.id] || []);
+    });
+
+    dayIndexes.forEach((dayIdx) => {
+      const d = DATA.days[dayIdx];
+      const working = pool.filter((p) => !restDates[p.id].has(d.date));
+      const assign = optimizeDayAssignments(dayIdx, working);
+      pool.forEach((p) => {
+        if (leaveSets[p.id].has(d.date)) setShift(p.id, d.date, "leave");
+        else if (restDates[p.id].has(d.date)) setShift(p.id, d.date, "rest");
+        else setShift(p.id, d.date, assign[p.id] || defaultShiftForStaff(p));
+      });
+    });
+
+    DATA.staff.forEach((p) => {
+      if (!p.excluded) return;
+      dayIndexes.forEach((i) => setShift(p.id, DATA.days[i].date, null));
+    });
   }
 
   function autoFillMonth() {
     WEEKS.forEach((w) => autoFillDays(w.dayIndexes));
-  }
-
-  function pad2(n) {
-    return String(n).padStart(2, "0");
-  }
-
-  function parseClock(str) {
-    const m = String(str || "").trim().match(/^(\d{1,2}):(\d{2})$/);
-    if (!m) return null;
-    const h = Number(m[1]);
-    const min = Number(m[2]);
-    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
-    return { h, min };
-  }
-
-  function formatClock(h, min) {
-    return pad2(h) + ":" + pad2(min);
-  }
-
-  function clocksFromLabel(label) {
-    const m = String(label || "").match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
-    if (!m) return null;
-    return {
-      start: formatClock(Number(m[1]), Number(m[2])),
-      end: formatClock(Number(m[3]), Number(m[4])),
-    };
   }
 
   function buildHours(startH, startM, endH, endM) {
@@ -448,6 +635,10 @@
     return "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   }
 
+  function newStaffId() {
+    return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
   function escapeAttr(str) {
     return String(str || "")
       .replace(/&/g, "&amp;")
@@ -460,7 +651,7 @@
     DATA.staff.forEach((p) => {
       DATA.days.forEach((d) => {
         const sh = schedule[p.id]?.[d.date];
-        if (sh && sh !== "rest" && !SHIFT_MAP[sh]) setShift(p.id, d.date, null);
+        if (sh && sh !== "rest" && sh !== "leave" && !SHIFT_MAP[sh]) setShift(p.id, d.date, null);
       });
     });
   }
@@ -575,25 +766,159 @@
     renderAll();
   }
 
-  function loadStaffBands() {
-    try {
-      const raw = localStorage.getItem(STAFF_BANDS_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw);
-      if (!saved || typeof saved !== "object") return;
-      DATA.staff.forEach((p) => {
-        const b = saved[p.id];
-        if (b === "早" || b === "晚" || b === "夜") p.band = b;
-      });
-    } catch (_) {}
+  /** 将 MM-DD / 日期片段匹配到 DATA.days 的完整日期 */
+  function parseLeaveInput(str) {
+    const tokens = String(str || "")
+      .split(/[,，\s]+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const out = [];
+    const seen = new Set();
+    tokens.forEach((tok) => {
+      let hit = null;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(tok)) {
+        hit = DATA.days.find((d) => d.date === tok);
+      } else {
+        const mmdd = tok.replace(/^0?(\d{1,2})[-/.]0?(\d{1,2})$/, (_, m, d) => pad2(m) + "-" + pad2(d));
+        hit = DATA.days.find((d) => d.date.slice(5) === mmdd);
+      }
+      if (hit && !seen.has(hit.date)) {
+        seen.add(hit.date);
+        out.push(hit.date);
+      }
+    });
+    return out;
   }
 
-  function saveStaffBands() {
+  function formatLeaveInput(dates) {
+    return (dates || []).map((d) => d.slice(5)).join(",");
+  }
+
+  function syncLeaveIntoSchedule() {
+    DATA.staff.forEach((p) => {
+      const leaveSet = new Set(p.leaveDates || []);
+      DATA.days.forEach((d) => {
+        if (!schedule[p.id]) schedule[p.id] = {};
+        if (leaveSet.has(d.date)) {
+          schedule[p.id][d.date] = "leave";
+        } else if (schedule[p.id][d.date] === "leave") {
+          schedule[p.id][d.date] = null;
+        }
+      });
+    });
+  }
+
+  function ensureStaffSchedule(p) {
+    if (!schedule[p.id]) schedule[p.id] = {};
+    DATA.days.forEach((d) => {
+      if (schedule[p.id][d.date] === undefined) schedule[p.id][d.date] = null;
+    });
+  }
+
+  function applyStaffMetaEntry(p, meta) {
+    if (!meta || typeof meta !== "object") return;
+    if (meta.band === "早" || meta.band === "晚" || meta.band === "夜") p.band = meta.band;
+    if (meta.preferredShift) p.preferredShift = meta.preferredShift;
+    else p.preferredShift = p.preferredShift || null;
+    p.excluded = Boolean(meta.excluded);
+    p.leaveDates = Array.isArray(meta.leaveDates) ? meta.leaveDates.slice() : p.leaveDates || [];
+    if (meta.custom) {
+      p.custom = true;
+      if (meta.name) p.name = meta.name;
+      if (typeof meta.capacity === "number") p.capacity = meta.capacity;
+      if (typeof meta.histEff === "number") p.histEff = meta.histEff;
+      if (typeof meta.dailyAvg === "number") p.dailyAvg = meta.dailyAvg;
+    }
+  }
+
+  function loadStaffMeta() {
+    let saved = null;
+    try {
+      const raw = localStorage.getItem(STAFF_META_KEY);
+      if (raw) saved = JSON.parse(raw);
+    } catch (_) {}
+
+    // 兼容旧版仅班段
+    if (!saved) {
+      try {
+        const raw = localStorage.getItem(STAFF_BANDS_KEY);
+        if (raw) {
+          const bands = JSON.parse(raw);
+          if (bands && typeof bands === "object") {
+            saved = {};
+            Object.keys(bands).forEach((id) => {
+              saved[id] = { band: bands[id] };
+            });
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!saved || typeof saved !== "object") {
+      DATA.staff.forEach((p) => {
+        p.preferredShift = p.preferredShift || null;
+        p.excluded = Boolean(p.excluded);
+        p.leaveDates = p.leaveDates || [];
+      });
+      return;
+    }
+
+    DATA.staff.forEach((p) => applyStaffMetaEntry(p, saved[p.id]));
+
+    Object.keys(saved).forEach((id) => {
+      if (DATA.staff.some((p) => p.id === id)) return;
+      const meta = saved[id];
+      if (!meta || !meta.custom) return;
+      DATA.staff.push({
+        id,
+        name: meta.name || "新客服",
+        band: meta.band === "晚" || meta.band === "夜" ? meta.band : "早",
+        site: "",
+        group: "自定义",
+        restQuota: REST_TARGET_WEEK,
+        histEff: meta.histEff || 35,
+        capacity: meta.capacity || 2,
+        histRecent: [],
+        tier: "自定义",
+        dailyAvg: meta.dailyAvg || 280,
+        custom: true,
+        preferredShift: meta.preferredShift || null,
+        excluded: Boolean(meta.excluded),
+        leaveDates: Array.isArray(meta.leaveDates) ? meta.leaveDates.slice() : [],
+      });
+    });
+
+    DATA.staff.forEach((p) => {
+      p.preferredShift = p.preferredShift || null;
+      p.excluded = Boolean(p.excluded);
+      p.leaveDates = p.leaveDates || [];
+    });
+  }
+
+  function saveStaffMeta() {
     const out = {};
     DATA.staff.forEach((p) => {
-      out[p.id] = p.band;
+      out[p.id] = {
+        band: p.band,
+        preferredShift: p.preferredShift || null,
+        excluded: Boolean(p.excluded),
+        leaveDates: (p.leaveDates || []).slice(),
+      };
+      if (p.custom) {
+        out[p.id].custom = true;
+        out[p.id].name = p.name;
+        out[p.id].capacity = p.capacity;
+        out[p.id].histEff = p.histEff;
+        out[p.id].dailyAvg = p.dailyAvg;
+      }
     });
-    localStorage.setItem(STAFF_BANDS_KEY, JSON.stringify(out));
+    localStorage.setItem(STAFF_META_KEY, JSON.stringify(out));
+    // 同步旧 key，便于回退
+    const bands = {};
+    DATA.staff.forEach((p) => {
+      bands[p.id] = p.band;
+    });
+    localStorage.setItem(STAFF_BANDS_KEY, JSON.stringify(bands));
   }
 
   function pruneShiftsForStaffBands() {
@@ -602,18 +927,30 @@
       const allowed = new Set(shiftsForBand(p.band).map((s) => s.id));
       DATA.days.forEach((d) => {
         const sh = schedule[p.id]?.[d.date];
-        if (sh && sh !== "rest" && !allowed.has(sh)) setShift(p.id, d.date, null);
+        if (sh && sh !== "rest" && sh !== "leave" && !allowed.has(sh)) setShift(p.id, d.date, null);
       });
     });
   }
 
   function resetStaffBands() {
+    // 去掉自定义人员，恢复默认名单与班段
+    DATA.staff = JSON.parse(JSON.stringify(DEFAULT_STAFF));
     DATA.staff.forEach((p) => {
       p.band = DEFAULT_STAFF_BANDS[p.id] || p.band;
+      p.preferredShift = null;
+      p.excluded = false;
+      p.leaveDates = [];
+      p.custom = false;
     });
     sortStaff();
+    Object.keys(schedule).forEach((id) => {
+      if (!DATA.staff.some((p) => p.id === id)) delete schedule[id];
+    });
+    DATA.staff.forEach(ensureStaffSchedule);
     pruneShiftsForStaffBands();
+    localStorage.removeItem(STAFF_META_KEY);
     localStorage.removeItem(STAFF_BANDS_KEY);
+    syncLeaveIntoSchedule();
   }
 
   function staffBandOptions(band) {
@@ -622,30 +959,70 @@
       .join("");
   }
 
+  function preferredShiftOptions(p) {
+    const band = p.band === "晚夜" ? "晚" : p.band || "早";
+    const cands = shiftsForBand(band);
+    const cur = p.preferredShift || "";
+    return (
+      `<option value="">自动</option>` +
+      cands
+        .map(
+          (s) =>
+            `<option value="${escapeAttr(s.id)}"${s.id === cur ? " selected" : ""}>${escapeAttr(s.short)}</option>`
+        )
+        .join("")
+    );
+  }
+
   function updateStaffBandCount() {
     const el = document.getElementById("staffBandCount");
     if (!el) return;
     const n = { 早: 0, 晚: 0, 夜: 0 };
-    document.querySelectorAll("#staffEditList [data-role='band']").forEach((sel) => {
-      if (n[sel.value] != null) n[sel.value] += 1;
+    let excluded = 0;
+    document.querySelectorAll("#staffEditList .staff-edit-row").forEach((row) => {
+      if (row.querySelector('[data-role="excluded"]')?.checked) {
+        excluded += 1;
+        return;
+      }
+      const sel = row.querySelector('[data-role="band"]');
+      if (sel && n[sel.value] != null) n[sel.value] += 1;
     });
-    el.textContent = `早 ${n["早"]} · 晚 ${n["晚"]} · 夜 ${n["夜"]}`;
+    el.textContent = `早 ${n["早"]} · 晚 ${n["晚"]} · 夜 ${n["夜"]}${excluded ? ` · 不排 ${excluded}` : ""}`;
+  }
+
+  function staffRowHtml(p) {
+    const band = p.band === "晚夜" ? "晚" : p.band || "早";
+    const meta = [p.site, p.group, p.tier].filter(Boolean).join(" · ");
+    const del = p.custom
+      ? `<button type="button" class="del-staff" title="删除">×</button>`
+      : `<span></span>`;
+    const nameCell = p.custom
+      ? `<input type="text" data-role="name" value="${escapeAttr(p.name)}" />`
+      : `<div><div class="n">${escapeAttr(p.name)}</div><div class="m">${escapeAttr(meta)}</div></div>`;
+    return (
+      `<div class="staff-edit-row${p.excluded ? " excluded" : ""}" data-id="${escapeAttr(p.id)}" data-text="${escapeAttr((p.name + " " + meta).toLowerCase())}">` +
+      nameCell +
+      `<select data-role="band">${staffBandOptions(band)}</select>` +
+      `<select data-role="preferred">${preferredShiftOptions({ ...p, band })}</select>` +
+      `<label class="chk"><input type="checkbox" data-role="excluded"${p.excluded ? " checked" : ""} />不排</label>` +
+      `<input type="text" class="leave-inp" data-role="leave" placeholder="09-25,10-01" value="${escapeAttr(formatLeaveInput(p.leaveDates))}" />` +
+      del +
+      `</div>`
+    );
+  }
+
+  function refreshPreferredOptions(row) {
+    const p = DATA.staff.find((x) => x.id === row.dataset.id);
+    if (!p) return;
+    const band = row.querySelector('[data-role="band"]').value;
+    const pref = row.querySelector('[data-role="preferred"]');
+    const cur = pref.value;
+    pref.innerHTML = preferredShiftOptions({ band, preferredShift: cur });
   }
 
   function openStaffModal() {
     const list = document.getElementById("staffEditList");
-    list.innerHTML = DATA.staff
-      .map((p) => {
-        const band = p.band === "晚夜" ? "晚" : p.band || "早";
-        const meta = [p.site, p.group, p.tier].filter(Boolean).join(" · ");
-        return (
-          `<div class="staff-edit-row" data-id="${escapeAttr(p.id)}" data-text="${escapeAttr((p.name + " " + meta).toLowerCase())}">` +
-          `<div><div class="n">${escapeAttr(p.name)}</div><div class="m">${escapeAttr(meta)}</div></div>` +
-          `<select data-role="band">${staffBandOptions(band)}</select>` +
-          `</div>`
-        );
-      })
-      .join("");
+    list.innerHTML = DATA.staff.map(staffRowHtml).join("");
     const filter = document.getElementById("staffFilter");
     filter.value = "";
     updateStaffBandCount();
@@ -664,28 +1041,83 @@
     });
   }
 
+  function addCustomStaff() {
+    const id = newStaffId();
+    const p = {
+      id,
+      name: "新客服",
+      band: "早",
+      site: "",
+      group: "自定义",
+      restQuota: REST_TARGET_WEEK,
+      histEff: 35,
+      capacity: 2,
+      histRecent: [],
+      tier: "自定义",
+      dailyAvg: 280,
+      custom: true,
+      preferredShift: null,
+      excluded: false,
+      leaveDates: [],
+    };
+    DATA.staff.push(p);
+    ensureStaffSchedule(p);
+    const list = document.getElementById("staffEditList");
+    const wrap = document.createElement("div");
+    wrap.innerHTML = staffRowHtml(p);
+    list.appendChild(wrap.firstElementChild);
+    updateStaffBandCount();
+    const nameInp = list.lastElementChild.querySelector('[data-role="name"]');
+    if (nameInp) {
+      nameInp.focus();
+      nameInp.select();
+    }
+  }
+
   function saveStaffModal() {
+    const rowIds = new Set(
+      [...document.querySelectorAll("#staffEditList .staff-edit-row")].map((r) => r.dataset.id)
+    );
     document.querySelectorAll("#staffEditList .staff-edit-row").forEach((row) => {
       const p = DATA.staff.find((x) => x.id === row.dataset.id);
       if (!p) return;
       const b = row.querySelector('[data-role="band"]').value;
       if (b === "早" || b === "晚" || b === "夜") p.band = b;
+      const pref = row.querySelector('[data-role="preferred"]').value;
+      p.preferredShift = pref || null;
+      p.excluded = Boolean(row.querySelector('[data-role="excluded"]')?.checked);
+      p.leaveDates = parseLeaveInput(row.querySelector('[data-role="leave"]').value);
+      const nameInp = row.querySelector('[data-role="name"]');
+      if (nameInp && p.custom) p.name = nameInp.value.trim() || p.name;
+      if (p.excluded) {
+        DATA.days.forEach((d) => setShift(p.id, d.date, null));
+      }
     });
+
+    DATA.staff = DATA.staff.filter((p) => rowIds.has(p.id));
+    Object.keys(schedule).forEach((id) => {
+      if (!DATA.staff.some((p) => p.id === id)) delete schedule[id];
+    });
+
     sortStaff();
+    DATA.staff.forEach(ensureStaffSchedule);
     pruneShiftsForStaffBands();
-    saveStaffBands();
+    syncLeaveIntoSchedule();
+    saveStaffMeta();
     closeStaffModal();
     renderAll();
   }
 
   function cellShiftLabel(current) {
     if (!current) return "·";
+    if (current === "leave") return "假";
     if (current === "rest") return "休";
     return SHIFT_MAP[current]?.short || current;
   }
 
   function cellShiftClass(current) {
     if (!current) return "empty";
+    if (current === "leave") return "leave";
     if (current === "rest") return "rest";
     return bandClass(current) || "empty";
   }
@@ -705,6 +1137,8 @@
     const items = [
       { value: "", label: "未排", cls: "empty" },
       { value: "rest", label: "休", cls: "rest" },
+      { value: "leave", label: "假", cls: "leave" },
+      { value: "__tiaoxiu__", label: "调休", cls: "swap" },
       ...DATA.shifts.map((s) => ({
         value: s.id,
         label: s.short,
@@ -723,7 +1157,7 @@
 
     const rect = anchor.getBoundingClientRect();
     const pw = 100;
-    const ph = Math.min(320, items.length * 36 + 12);
+    const ph = Math.min(360, items.length * 36 + 12);
     let left = rect.left;
     let top = rect.bottom + 4;
     if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
@@ -731,6 +1165,64 @@
     if (left < 8) left = 8;
     picker.style.left = left + "px";
     picker.style.top = top + "px";
+  }
+
+  /** 调休：工作↔休息对调，请假日不动 */
+  function applyTiaoxiu(staffId, date) {
+    const p = DATA.staff.find((x) => x.id === staffId);
+    if (!p) return false;
+    const cur = normalizeShift(schedule[staffId]?.[date]);
+    if (cur === "leave") {
+      alert("请假日不能调休，请先取消请假。");
+      return false;
+    }
+
+    const leaveSet = new Set(p.leaveDates || []);
+    const dates = DATA.days.map((d) => d.date);
+
+    if (isWorkShift(cur) || cur === null) {
+      // 上班 → 休息：找一个非请假的休息日改上班（优先高需求休息日）
+      let best = null;
+      dates.forEach((d) => {
+        if (d === date || leaveSet.has(d)) return;
+        const sh = normalizeShift(schedule[staffId]?.[d]);
+        if (sh !== "rest") return;
+        const di = dayIndexOf(d);
+        const demand = dayDemandHc(di);
+        if (!best || demand > best.demand) best = { date: d, demand };
+      });
+      if (!best) {
+        alert("没有可对调的休息日（非请假）。");
+        return false;
+      }
+      const workShift = isWorkShift(cur) ? cur : defaultShiftForStaff(p);
+      if (!assignShift(staffId, best.date, workShift)) return false;
+      setShift(staffId, date, "rest");
+      return true;
+    }
+
+    if (cur === "rest") {
+      // 休息 → 上班：找一个上班日改休息（优先低需求日）
+      let best = null;
+      dates.forEach((d) => {
+        if (d === date || leaveSet.has(d)) return;
+        const sh = normalizeShift(schedule[staffId]?.[d]);
+        if (!isWorkShift(sh)) return;
+        const di = dayIndexOf(d);
+        const demand = dayDemandHc(di);
+        if (!best || demand < best.demand) best = { date: d, demand, shift: sh };
+      });
+      if (!best) {
+        alert("没有可对调的上班日。");
+        return false;
+      }
+      const workShift = defaultShiftForStaff(p);
+      if (!assignShift(staffId, date, workShift)) return false;
+      setShift(staffId, best.date, "rest");
+      return true;
+    }
+
+    return false;
   }
 
   function keyOf(staffId, date) {
@@ -766,22 +1258,24 @@
         .join("") +
       `<span class="leg"><span class="dot"></span> 未排</span>` +
       `<span class="leg"><span class="chip rest">休</span> 休息</span>` +
+      `<span class="leg"><span class="chip leave">假</span> 请假</span>` +
       `<button type="button" class="adj-btn" id="adjustShifts" title="增删班次、修改时间段">班次调整</button>` +
-      `<button type="button" class="adj-btn" id="adjustStaff" title="指定每位客服早班 / 晚班 / 夜班">人员调整</button>`;
+      `<button type="button" class="adj-btn" id="adjustStaff" title="班段 / 子班次 / 请假 / 不排">人员调整</button>`;
   }
 
-  function renderWeekPick() {
-    const el = document.getElementById("weekPick");
-    if (!el) return;
-    el.innerHTML = WEEKS.map((w, i) => {
-      const on = i === focusWeek ? " on" : "";
-      return `<button type="button" data-week="${i}" class="${on}">第${i + 1}周 ${w.label}</button>`;
-    }).join("");
+  function monthRestCount(p) {
+    let n = 0;
+    DATA.days.forEach((d) => {
+      const sh = normalizeShift(schedule[p.id]?.[d.date]);
+      if (sh === "rest" || sh === "leave") n += 1;
+    });
+    return n;
   }
 
   function renderCal() {
     const table = document.getElementById("cal");
     const idxs = viewDayIndexes();
+    const target = monthRestTarget();
     let head1 =
       '<tr><th class="sticky-name">人员</th>' +
       idxs
@@ -791,7 +1285,7 @@
           return `<th>${Number(dayNum)}<br/><span style="font-weight:400">周${d.weekday}</span></th>`;
         })
         .join("") +
-      "</tr>";
+      `<th class="sticky-rest">月休</th></tr>`;
 
     let head2 =
       '<tr class="demand"><th class="sticky-name">需求/已排</th>' +
@@ -802,37 +1296,58 @@
           return `<th class="${cls}">${st.demandHc}/${st.headcount}</th>`;
         })
         .join("") +
-      "</tr>";
+      `<th class="sticky-rest">目标${target}</th></tr>`;
 
     let body = "";
-    DATA.staff.forEach((p) => {
-      body += `<tr><td class="sticky-name"><div class="name">${p.name}</div><div class="meta">${p.dailyAvg || Math.round(p.histEff * 7.5)}单/天 · ${p.histEff}单/时 · 休${p.restQuota}天 · ${p.band}${p.tier ? " · " + p.tier : ""}</div></td>`;
+    activeStaff().forEach((p) => {
+      const restN = monthRestCount(p);
+      const restCls = restN < target ? "short" : "ok";
+      body += `<tr><td class="sticky-name"><div class="name">${p.name}</div><div class="meta">${p.dailyAvg || Math.round(p.histEff * 7.5)}单/天 · ${p.histEff}单/时 · ${p.band}${p.tier ? " · " + p.tier : ""}</div></td>`;
       idxs.forEach((i) => {
         const d = DATA.days[i];
         const sh = schedule[p.id]?.[d.date] || null;
         const sel = selected.has(keyOf(p.id, d.date)) ? " selected" : "";
-        const title = sh === "rest" ? "休息" : SHIFT_MAP[sh]?.label || "未排";
+        const title =
+          sh === "leave" ? "请假" : sh === "rest" ? "休息" : SHIFT_MAP[sh]?.label || "未排";
         body +=
           `<td class="cell${sel}" data-staff="${p.id}" data-date="${d.date}">` +
           `<button type="button" class="cell-shift ${cellShiftClass(sh)}" data-staff="${p.id}" data-date="${d.date}" title="${title}">` +
           `${cellShiftLabel(sh)}` +
           `</button></td>`;
       });
-      body += "</tr>";
+      body += `<td class="sticky-rest ${restCls}">${restN}/${target}</td></tr>`;
     });
 
     table.innerHTML = "<thead>" + head1 + head2 + "</thead><tbody>" + body + "</tbody>";
   }
 
-  function renderDayPick() {
-    const el = document.getElementById("dayPick");
-    el.innerHTML = viewDayIndexes()
-      .map((i) => {
-        const d = DATA.days[i];
-        const on = i === focusDay ? " on" : "";
-        return `<button type="button" data-day="${i}" class="${on}">${d.date.slice(5)} 周${d.weekday}</button>`;
-      })
-      .join("");
+  function renderMonthCal() {
+    const el = document.getElementById("monthCal");
+    const title = document.getElementById("monthTitle");
+    if (!el) return;
+    if (title) {
+      const a = DATA.days[0]?.date?.slice(5) || "";
+      const b = DATA.days[DATA.days.length - 1]?.date?.slice(5) || "";
+      title.textContent = `${a} ～ ${b}`;
+    }
+
+    // 以周一为一周起点：weekday 一=0 … 日=6
+    const wdMap = { 一: 0, 二: 1, 三: 2, 四: 3, 五: 4, 六: 5, 日: 6 };
+    const firstWd = wdMap[DATA.days[0].weekday] ?? 0;
+    let html = ["一", "二", "三", "四", "五", "六", "日"].map((w) => `<div class="hd">${w}</div>`).join("");
+    for (let i = 0; i < firstWd; i++) html += `<div></div>`;
+
+    DATA.days.forEach((d, i) => {
+      const st = dayScheduled(i);
+      const on = i === focusDay ? " on" : "";
+      const short = st.headcount < st.demandHc ? " short" : "";
+      html +=
+        `<button type="button" data-day="${i}" class="${on}${short}">` +
+        `<span class="d">${Number(d.date.slice(8))}</span>` +
+        `<span class="r">${st.demandHc}/${st.headcount}</span>` +
+        `</button>`;
+    });
+    el.innerHTML = html;
   }
 
   function renderHour() {
@@ -882,7 +1397,8 @@
     DATA.shifts.forEach((s) => {
       groups[s.id] = [];
     });
-    DATA.staff.forEach((p) => {
+    const pool = activeStaff();
+    pool.forEach((p) => {
       const sh = schedule[p.id]?.[date];
       if (sh && SHIFT_MAP[sh]) groups[sh].push(p);
     });
@@ -899,19 +1415,21 @@
         "</div>"
       );
     };
-    const resting = DATA.staff.filter((p) => schedule[p.id]?.[date] === "rest");
-    const unscheduled = DATA.staff.filter((p) => {
+    const resting = pool.filter((p) => schedule[p.id]?.[date] === "rest");
+    const leaving = pool.filter((p) => schedule[p.id]?.[date] === "leave");
+    const unscheduled = pool.filter((p) => {
       const sh = schedule[p.id]?.[date];
       return !sh;
     });
     let html = DATA.shifts.map((s) => block(`${s.name} ${s.label}`, groups[s.id])).join("");
     html += block("休息", resting);
+    html += block("请假", leaving);
     html += block("未排", unscheduled);
     document.getElementById("tabRoster").innerHTML = html || `<div class="note">本日尚未排班</div>`;
   }
 
   function renderEff() {
-    const rows = DATA.staff
+    const rows = activeStaff()
       .slice()
       .sort((a, b) => b.histEff - a.histEff)
       .map((p) => {
@@ -929,9 +1447,8 @@
 
   function renderAll() {
     closeShiftPicker();
-    renderWeekPick();
     renderCal();
-    renderDayPick();
+    renderMonthCal();
     renderHour();
     renderRoster();
     renderEff();
@@ -945,7 +1462,7 @@
     const staffId = cell.dataset.staff;
     const date = cell.dataset.date;
     const di = DATA.days.findIndex((d) => d.date === date);
-    if (di >= 0) syncFocusFromDay(di);
+    if (di >= 0) focusDay = di;
 
     if (e.shiftKey || e.metaKey) {
       e.preventDefault();
@@ -961,7 +1478,7 @@
       e.stopPropagation();
       const cur = schedule[staffId]?.[date] || null;
       openShiftPicker(btn, staffId, date, cur);
-      renderDayPick();
+      renderMonthCal();
       renderHour();
       renderRoster();
       renderEff();
@@ -969,7 +1486,7 @@
     }
 
     closeShiftPicker();
-    renderDayPick();
+    renderMonthCal();
     renderHour();
     renderRoster();
     renderEff();
@@ -983,9 +1500,36 @@
     const date = picker.dataset.date;
     if (!staffId || !date) return;
     const val = opt.dataset.value || null;
-    setShift(staffId, date, val);
+
+    if (val === "__tiaoxiu__") {
+      applyTiaoxiu(staffId, date);
+      closeShiftPicker();
+      renderAll();
+      return;
+    }
+
+    if (val === "leave") {
+      const p = DATA.staff.find((x) => x.id === staffId);
+      if (p) {
+        const set = new Set(p.leaveDates || []);
+        set.add(date);
+        p.leaveDates = [...set];
+        saveStaffMeta();
+      }
+      setShift(staffId, date, "leave");
+    } else {
+      if (val === "rest" || !val) {
+        const p = DATA.staff.find((x) => x.id === staffId);
+        if (p && (p.leaveDates || []).includes(date)) {
+          p.leaveDates = p.leaveDates.filter((d) => d !== date);
+          saveStaffMeta();
+        }
+      }
+      if (!assignShift(staffId, date, val || null)) return;
+    }
+
     const di = DATA.days.findIndex((d) => d.date === date);
-    if (di >= 0) syncFocusFromDay(di);
+    if (di >= 0) focusDay = di;
     closeShiftPicker();
     renderAll();
   });
@@ -1006,29 +1550,21 @@
     if (!cell) return;
     e.preventDefault();
     closeShiftPicker();
-    setShift(cell.dataset.staff, cell.dataset.date, null);
+    const staffId = cell.dataset.staff;
+    const date = cell.dataset.date;
+    const p = DATA.staff.find((x) => x.id === staffId);
+    if (p && (p.leaveDates || []).includes(date)) {
+      p.leaveDates = p.leaveDates.filter((d) => d !== date);
+      saveStaffMeta();
+    }
+    setShift(staffId, date, null);
     renderAll();
   });
 
-  function syncFocusFromDay(dayIdx) {
-    if (dayIdx < 0) return;
-    focusDay = dayIdx;
-    const wi = WEEKS.findIndex((w) => w.dayIndexes.includes(dayIdx));
-    if (wi >= 0) focusWeek = wi;
-  }
-
-  document.getElementById("weekPick").addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-week]");
-    if (!btn) return;
-    setFocusWeek(Number(btn.dataset.week), false);
-    selected.clear();
-    renderAll();
-  });
-
-  document.getElementById("dayPick").addEventListener("click", (e) => {
+  document.getElementById("monthCal").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-day]");
     if (!btn) return;
-    syncFocusFromDay(Number(btn.dataset.day));
+    focusDay = Number(btn.dataset.day);
     renderAll();
   });
 
@@ -1040,32 +1576,19 @@
     }
     selected.forEach((k) => {
       const [staffId, date] = k.split("|");
-      setShift(staffId, date, shift);
+      assignShift(staffId, date, shift);
     });
     selected.clear();
     renderAll();
   });
 
-  document.getElementById("autoFill").addEventListener("click", () => {
-    const w = WEEKS[focusWeek];
-    if (!confirm(`将重排第 ${focusWeek + 1} 周（${w.label}）：按缺口最小，不跨早/晚/夜，每人至少休息 1 天，继续？`)) return;
-    const btn = document.getElementById("autoFill");
-    btn.disabled = true;
-    btn.textContent = "排班中…";
-    setTimeout(() => {
-      try {
-        autoFillWeek();
-        selected.clear();
-        renderAll();
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "一键排班";
-      }
-    }, 20);
-  });
-
   document.getElementById("autoFillMonth").addEventListener("click", () => {
-    if (!confirm("将重排整月四周：每周每人至少休息 1 天，覆盖现有排班，继续？")) return;
+    if (
+      !confirm(
+        `将重排整月（${WEEKS.length} 周）：每周每人休息 ${REST_TARGET_WEEK} 天，尊重请假与不排人员，覆盖现有排班，继续？`
+      )
+    )
+      return;
     const btn = document.getElementById("autoFillMonth");
     btn.disabled = true;
     btn.textContent = "排班中…";
@@ -1117,11 +1640,28 @@
   });
   document.getElementById("staffSave").addEventListener("click", saveStaffModal);
   document.getElementById("staffFilter").addEventListener("input", filterStaffRows);
+  document.getElementById("staffAdd").addEventListener("click", addCustomStaff);
   document.getElementById("staffEditList").addEventListener("change", (e) => {
-    if (e.target.matches('[data-role="band"]')) updateStaffBandCount();
+    const row = e.target.closest(".staff-edit-row");
+    if (!row) return;
+    if (e.target.matches('[data-role="band"]')) {
+      refreshPreferredOptions(row);
+      updateStaffBandCount();
+    }
+    if (e.target.matches('[data-role="excluded"]')) {
+      row.classList.toggle("excluded", e.target.checked);
+      updateStaffBandCount();
+    }
+  });
+  document.getElementById("staffEditList").addEventListener("click", (e) => {
+    const btn = e.target.closest(".del-staff");
+    if (!btn) return;
+    const row = btn.closest(".staff-edit-row");
+    if (row) row.remove();
+    updateStaffBandCount();
   });
   document.getElementById("staffReset").addEventListener("click", () => {
-    if (!confirm("恢复为默认人员班段（早/晚/夜）？")) return;
+    if (!confirm("恢复为默认人员（班段/请假/不排/自定义将清空）？")) return;
     resetStaffBands();
     openStaffModal();
     renderAll();
@@ -1130,18 +1670,23 @@
   document.getElementById("clearSelected").addEventListener("click", () => {
     selected.forEach((k) => {
       const [staffId, date] = k.split("|");
+      const p = DATA.staff.find((x) => x.id === staffId);
+      if (p && (p.leaveDates || []).includes(date)) {
+        p.leaveDates = p.leaveDates.filter((d) => d !== date);
+        saveStaffMeta();
+      }
       setShift(staffId, date, null);
     });
     selected.clear();
     renderAll();
   });
 
-  document.getElementById("clearWeek").addEventListener("click", () => {
-    const w = WEEKS[focusWeek];
-    if (!confirm(`清空第 ${focusWeek + 1} 周（${w.label}）全部排班？`)) return;
+  document.getElementById("clearMonth").addEventListener("click", () => {
+    if (!confirm("清空整月全部排班？（请假标记保留在人员设置中，格子将同步为假）")) return;
     DATA.staff.forEach((p) => {
-      w.dayIndexes.forEach((i) => setShift(p.id, DATA.days[i].date, null));
+      DATA.days.forEach((d) => setShift(p.id, d.date, null));
     });
+    syncLeaveIntoSchedule();
     selected.clear();
     renderAll();
   });
@@ -1152,6 +1697,19 @@
       monthEnd: DATA.meta.monthEnd,
       weeks: WEEKS,
       shifts: DATA.shifts,
+      staffMeta: Object.fromEntries(
+        DATA.staff.map((p) => [
+          p.id,
+          {
+            name: p.name,
+            band: p.band,
+            preferredShift: p.preferredShift || null,
+            excluded: Boolean(p.excluded),
+            leaveDates: (p.leaveDates || []).slice(),
+            custom: Boolean(p.custom),
+          },
+        ])
+      ),
       schedule,
       advice: DATA.days.map((_, i) => {
         const a = adviceForDay(i);
@@ -1183,18 +1741,7 @@
   });
 
   (function seedIfEmpty() {
-    const any = DATA.staff.some((p) => DATA.days.some((d) => schedule[p.id]?.[d.date]));
-    if (any) return;
-    const earlyPeople = DATA.staff.filter((p) => p.band === "早").slice(0, 6);
-    const latePeople = DATA.staff.filter((p) => p.band === "晚").slice(0, 6);
-    const nightPeople = DATA.staff.filter((p) => p.band === "夜").slice(0, 2);
-    DATA.days.slice(0, 3).forEach((d, i) => {
-      earlyPeople.forEach((p, j) => setShift(p.id, d.date, ["early7", "early8", "early9"][j % 3]));
-      latePeople.forEach((p, j) =>
-        setShift(p.id, d.date, ["late1530", "late1630", "late1730", "late1830"][j % 4])
-      );
-      if (i < 2) nightPeople.forEach((p) => setShift(p.id, d.date, "night2330"));
-    });
+    // 整月默认留空，由「整月排班」生成
   })();
 
   fillSelect();
