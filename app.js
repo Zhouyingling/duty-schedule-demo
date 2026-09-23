@@ -21,7 +21,7 @@
   const DEFAULT_SHIFTS = JSON.parse(JSON.stringify(DATA.shifts));
   const DEFAULT_STAFF = JSON.parse(JSON.stringify(DATA.staff));
   const DEFAULT_STAFF_BANDS = Object.fromEntries(DEFAULT_STAFF.map((p) => [p.id, p.band]));
-  const REST_TARGET_WEEK = 4;
+  const REST_TARGET_MONTH = 4;
   const WEEKS =
     DATA.weeks && DATA.weeks.length
       ? DATA.weeks
@@ -57,7 +57,7 @@
   }
 
   function monthRestTarget() {
-    return REST_TARGET_WEEK * WEEKS.length;
+    return REST_TARGET_MONTH;
   }
 
   loadShiftCatalog();
@@ -73,6 +73,23 @@
     DATA.days.findIndex((d) => d.date === "2026-09-28")
   );
   if (focusDay < 0) focusDay = 0;
+  let staffFilterQ = "";
+  let staffSearchOpen = false;
+  let openStaffId = null;
+
+  function visibleStaff() {
+    const q = staffFilterQ.trim().toLowerCase();
+    return activeStaff().filter((p) => {
+      if (!q) return true;
+      const hay = [p.name, p.site, p.group, p.band, p.tier].filter(Boolean).join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+  }
+
+  function isWeekendDay(dayIdx) {
+    const w = DATA.days[dayIdx]?.weekday;
+    return w === "六" || w === "日";
+  }
 
   function viewDayIndexes() {
     return DATA.days.map((_, i) => i);
@@ -509,12 +526,12 @@
   }
 
   /**
-   * 每人每周休息 4 天（请假日优先计入）。
-   * @param {number[]} dayIndexes
+   * 每人每月休息 REST_TARGET_MONTH 天（请假优先计入）。
+   * 尽量周末休；周末需求高则改为工作日休。
    * @returns {Record<string, string[]>} staffId -> rest dates（含 leave）
    */
-  function pickWeeklyRestDays(dayIndexes) {
-    const idxs = dayIndexes || DATA.days.map((_, i) => i);
+  function pickMonthlyRestDays() {
+    const idxs = DATA.days.map((_, i) => i);
     const restByStaff = {};
     const byBand = { 早: [], 晚: [], 夜: [] };
     activeStaff().forEach((p) => {
@@ -527,23 +544,26 @@
       const restCount = Object.fromEntries(idxs.map((i) => [i, 0]));
 
       people.forEach((p) => {
-        const forced = staffLeaveDatesInWeek(p, idxs);
+        const leaveSet = new Set(p.leaveDates || []);
+        const forced = idxs.map((i) => DATA.days[i].date).filter((d) => leaveSet.has(d));
         const picked = new Set(forced);
         forced.forEach((date) => {
           const di = dayIndexOf(date);
           if (di >= 0 && restCount[di] != null) restCount[di] += 1;
         });
 
-        const need = Math.max(0, REST_TARGET_WEEK - picked.size);
+        const need = Math.max(0, REST_TARGET_MONTH - picked.size);
         for (let n = 0; n < need; n++) {
           let bestDay = null;
           let bestScore = Infinity;
           idxs.forEach((dayIdx) => {
             const date = DATA.days[dayIdx].date;
             if (picked.has(date)) return;
-            // 高产能优先低需求日；同时分散休息人数
+            const demand = bandPeakDemand(dayIdx, band);
+            // 周末优先；周末需求高时分数变差，会落到工作日
+            const weekendBias = isWeekendDay(dayIdx) ? 0 : 60000;
             const score =
-              restCount[dayIdx] * 100000 + bandPeakDemand(dayIdx, band) - p.capacity * 0.01;
+              restCount[dayIdx] * 100000 + weekendBias + demand * (isWeekendDay(dayIdx) ? 40 : 8);
             if (score < bestScore) {
               bestScore = score;
               bestDay = dayIdx;
@@ -568,13 +588,13 @@
     return cands[0] ? cands[0].id : null;
   }
 
-  function autoFillDays(dayIndexes) {
+  function autoFillDays(dayIndexes, restByStaff) {
     const pool = activeStaff();
-    const restByStaff = pickWeeklyRestDays(dayIndexes);
+    const rests = restByStaff || pickMonthlyRestDays();
     const leaveSets = Object.fromEntries(pool.map((p) => [p.id, new Set(p.leaveDates || [])]));
     const restDates = {};
     pool.forEach((p) => {
-      restDates[p.id] = new Set(restByStaff[p.id] || []);
+      restDates[p.id] = new Set(rests[p.id] || []);
     });
 
     dayIndexes.forEach((dayIdx) => {
@@ -595,7 +615,11 @@
   }
 
   function autoFillMonth() {
-    WEEKS.forEach((w) => autoFillDays(w.dayIndexes));
+    const rests = pickMonthlyRestDays();
+    autoFillDays(
+      DATA.days.map((_, i) => i),
+      rests
+    );
   }
 
   function buildHours(startH, startM, endH, endM) {
@@ -875,7 +899,7 @@
         band: meta.band === "晚" || meta.band === "夜" ? meta.band : "早",
         site: "",
         group: "自定义",
-        restQuota: REST_TARGET_WEEK,
+        restQuota: REST_TARGET_MONTH,
         histEff: meta.histEff || 35,
         capacity: meta.capacity || 2,
         histRecent: [],
@@ -1049,7 +1073,7 @@
       band: "早",
       site: "",
       group: "自定义",
-      restQuota: REST_TARGET_WEEK,
+      restQuota: REST_TARGET_MONTH,
       histEff: 35,
       capacity: 2,
       histRecent: [],
@@ -1272,12 +1296,74 @@
     return n;
   }
 
+  function closeStaffPop() {
+    openStaffId = null;
+    const pop = document.getElementById("staffPop");
+    if (pop) {
+      pop.hidden = true;
+      pop.innerHTML = "";
+    }
+  }
+
+  function openStaffPop(staffId, anchor) {
+    const p = DATA.staff.find((x) => x.id === staffId);
+    const pop = document.getElementById("staffPop");
+    if (!p || !pop) return;
+    openStaffId = staffId;
+    const date = DATA.days[focusDay]?.date;
+    const sh = schedule[p.id]?.[date] || null;
+    const shiftOpts =
+      `<option value="">未排</option><option value="rest"${sh === "rest" ? " selected" : ""}>休</option>` +
+      `<option value="leave"${sh === "leave" ? " selected" : ""}>假</option>` +
+      shiftsForBand(p.band)
+        .map(
+          (s) =>
+            `<option value="${s.id}"${sh === s.id ? " selected" : ""}>${s.short} ${s.label}</option>`
+        )
+        .join("");
+    const prefOpts =
+      `<option value="">默认</option>` +
+      shiftsForBand(p.band)
+        .map(
+          (s) =>
+            `<option value="${s.id}"${p.preferredShift === s.id ? " selected" : ""}>${s.short}</option>`
+        )
+        .join("");
+    pop.innerHTML =
+      `<div class="t">${escapeAttr(p.name)}</div>` +
+      `<div class="row">${p.dailyAvg || Math.round(p.histEff * 7.5)} 单/天 · ${p.histEff} 单/时 · 容量 ${p.capacity}</div>` +
+      `<div class="row">${p.band}班${p.tier ? " · " + p.tier : ""}${p.site ? " · " + p.site : ""}${p.group ? " · " + p.group : ""}</div>` +
+      `<div class="row">今日（${date ? date.slice(5) : "—"}）班次</div>` +
+      `<select data-role="today">${shiftOpts}</select>` +
+      `<div class="row">偏好子班次</div>` +
+      `<select data-role="pref">${prefOpts}</select>` +
+      `<div class="acts">` +
+      `<button type="button" class="primary" data-act="apply">应用今日班次</button>` +
+      `<button type="button" data-act="close">关闭</button>` +
+      `</div>`;
+    pop.hidden = false;
+    const rect = anchor.getBoundingClientRect();
+    const w = 240;
+    let left = rect.right + 8;
+    let top = rect.top;
+    if (left + w > window.innerWidth - 8) left = Math.max(8, rect.left - w - 8);
+    if (top + 260 > window.innerHeight - 8) top = Math.max(8, window.innerHeight - 268);
+    pop.style.left = left + "px";
+    pop.style.top = top + "px";
+  }
+
   function renderCal() {
     const table = document.getElementById("cal");
     const idxs = viewDayIndexes();
     const target = monthRestTarget();
+    const searchOn = staffSearchOpen || staffFilterQ ? " on" : "";
     let head1 =
-      '<tr><th class="sticky-name">人员</th>' +
+      '<tr><th class="sticky-name"><div class="name-head"><span>人员</span>' +
+      `<button type="button" class="name-search-btn${searchOn}" id="staffSearchBtn" title="搜索客服">⌕</button></div>` +
+      (staffSearchOpen || staffFilterQ
+        ? `<input type="search" class="name-filter" id="staffNameFilter" placeholder="搜索姓名…" value="${escapeAttr(staffFilterQ)}" />`
+        : "") +
+      "</th>" +
       idxs
         .map((i) => {
           const d = DATA.days[i];
@@ -1299,10 +1385,14 @@
       `<th class="sticky-rest">目标${target}</th></tr>`;
 
     let body = "";
-    activeStaff().forEach((p) => {
+    visibleStaff().forEach((p) => {
       const restN = monthRestCount(p);
       const restCls = restN < target ? "short" : "ok";
-      body += `<tr><td class="sticky-name"><div class="name">${p.name}</div><div class="meta">${p.dailyAvg || Math.round(p.histEff * 7.5)}单/天 · ${p.histEff}单/时 · ${p.band}${p.tier ? " · " + p.tier : ""}</div></td>`;
+      const open = openStaffId === p.id ? " open" : "";
+      body +=
+        `<tr><td class="sticky-name${open}">` +
+        `<button type="button" class="name-btn" data-staff="${p.id}" title="查看人效并调整班次">${escapeAttr(p.name)}</button>` +
+        `</td>`;
       idxs.forEach((i) => {
         const d = DATA.days[i];
         const sh = schedule[p.id]?.[d.date] || null;
@@ -1319,6 +1409,14 @@
     });
 
     table.innerHTML = "<thead>" + head1 + head2 + "</thead><tbody>" + body + "</tbody>";
+    const filter = document.getElementById("staffNameFilter");
+    if (filter && staffSearchOpen) {
+      filter.focus();
+      const len = filter.value.length;
+      try {
+        filter.setSelectionRange(len, len);
+      } catch (_) {}
+    }
   }
 
   function renderMonthCal() {
@@ -1453,9 +1551,40 @@
     renderRoster();
     renderEff();
     save();
+    if (openStaffId) {
+      const btn = document.querySelector(`.name-btn[data-staff="${openStaffId}"]`);
+      if (btn) openStaffPop(openStaffId, btn);
+      else closeStaffPop();
+    }
   }
 
   document.getElementById("cal").addEventListener("click", (e) => {
+    const searchBtn = e.target.closest("#staffSearchBtn");
+    if (searchBtn) {
+      e.stopPropagation();
+      staffSearchOpen = !staffSearchOpen;
+      if (!staffSearchOpen) staffFilterQ = "";
+      renderCal();
+      return;
+    }
+
+    const nameBtn = e.target.closest("button.name-btn");
+    if (nameBtn) {
+      e.stopPropagation();
+      closeShiftPicker();
+      const id = nameBtn.dataset.staff;
+      if (openStaffId === id) closeStaffPop();
+      else openStaffPop(id, nameBtn);
+      renderCal();
+      if (openStaffId) {
+        const btn = document.querySelector(`.name-btn[data-staff="${openStaffId}"]`);
+        if (btn) openStaffPop(openStaffId, btn);
+      }
+      return;
+    }
+
+    if (e.target.closest("#staffNameFilter")) return;
+
     const btn = e.target.closest("button.cell-shift");
     const cell = e.target.closest(".cell");
     if (!cell) return;
@@ -1467,6 +1596,7 @@
     if (e.shiftKey || e.metaKey) {
       e.preventDefault();
       closeShiftPicker();
+      closeStaffPop();
       const k = keyOf(staffId, date);
       if (selected.has(k)) selected.delete(k);
       else selected.add(k);
@@ -1476,6 +1606,7 @@
 
     if (btn) {
       e.stopPropagation();
+      closeStaffPop();
       const cur = schedule[staffId]?.[date] || null;
       openShiftPicker(btn, staffId, date, cur);
       renderMonthCal();
@@ -1486,10 +1617,65 @@
     }
 
     closeShiftPicker();
+    closeStaffPop();
     renderMonthCal();
     renderHour();
     renderRoster();
     renderEff();
+  });
+
+  document.getElementById("cal").addEventListener("input", (e) => {
+    if (e.target.id !== "staffNameFilter") return;
+    staffFilterQ = e.target.value;
+    staffSearchOpen = true;
+    renderCal();
+  });
+
+  document.getElementById("staffPop").addEventListener("click", (e) => {
+    const act = e.target.closest("button[data-act]");
+    if (!act || !openStaffId) return;
+    if (act.dataset.act === "close") {
+      closeStaffPop();
+      renderCal();
+      return;
+    }
+    if (act.dataset.act === "apply") {
+      const pop = document.getElementById("staffPop");
+      const today = pop.querySelector('[data-role="today"]').value || null;
+      const pref = pop.querySelector('[data-role="pref"]').value || "";
+      const p = DATA.staff.find((x) => x.id === openStaffId);
+      if (p) {
+        p.preferredShift = pref || null;
+        saveStaffMeta();
+      }
+      const date = DATA.days[focusDay]?.date;
+      if (date) {
+        if (today === "leave") {
+          if (p) {
+            const set = new Set(p.leaveDates || []);
+            set.add(date);
+            p.leaveDates = [...set];
+            saveStaffMeta();
+          }
+          setShift(openStaffId, date, "leave");
+        } else {
+          if (p && (p.leaveDates || []).includes(date)) {
+            p.leaveDates = p.leaveDates.filter((d) => d !== date);
+            saveStaffMeta();
+          }
+          if (!assignShift(openStaffId, date, today)) return;
+        }
+      }
+      renderAll();
+    }
+  });
+
+  document.getElementById("staffPop").addEventListener("change", (e) => {
+    if (!e.target.matches('[data-role="pref"]') || !openStaffId) return;
+    const p = DATA.staff.find((x) => x.id === openStaffId);
+    if (!p) return;
+    p.preferredShift = e.target.value || null;
+    saveStaffMeta();
   });
 
   document.getElementById("shiftPicker").addEventListener("click", (e) => {
@@ -1536,13 +1722,31 @@
 
   document.addEventListener("mousedown", (e) => {
     const picker = document.getElementById("shiftPicker");
-    if (picker.hidden) return;
-    if (e.target.closest("#shiftPicker") || e.target.closest("button.cell-shift")) return;
-    closeShiftPicker();
+    if (!picker.hidden) {
+      if (!e.target.closest("#shiftPicker") && !e.target.closest("button.cell-shift")) {
+        closeShiftPicker();
+      }
+    }
+    const pop = document.getElementById("staffPop");
+    if (pop && !pop.hidden) {
+      if (
+        !e.target.closest("#staffPop") &&
+        !e.target.closest("button.name-btn") &&
+        !e.target.closest("#staffSearchBtn") &&
+        !e.target.closest("#staffNameFilter")
+      ) {
+        closeStaffPop();
+        renderCal();
+      }
+    }
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeShiftPicker();
+    if (e.key === "Escape") {
+      closeShiftPicker();
+      closeStaffPop();
+      renderCal();
+    }
   });
 
   document.getElementById("cal").addEventListener("contextmenu", (e) => {
@@ -1585,7 +1789,7 @@
   document.getElementById("autoFillMonth").addEventListener("click", () => {
     if (
       !confirm(
-        `将重排整月（${WEEKS.length} 周）：每周每人休息 ${REST_TARGET_WEEK} 天，尊重请假与不排人员，覆盖现有排班，继续？`
+        `将重排整月：每人月休 ${REST_TARGET_MONTH} 天（尽量周末休），尊重请假与不排人员，覆盖现有排班，继续？`
       )
     )
       return;

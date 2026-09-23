@@ -131,29 +131,47 @@
     .shift-picker button.leave { background: #f2c9c9; color: #8a3030; }
     .shift-picker button.swap { background: #e8eef8; color: #3d5573; }
 
+    .layout {
+      display: grid;
+      grid-template-columns: 228px minmax(0, 1fr);
+      gap: 12px;
+      padding: 12px 16px 24px;
+      align-items: start;
+    }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .side {
+      min-width: 0;
+      max-width: 228px;
+    }
+    .side .card {
+      overflow: hidden;
+      padding: 10px 10px 12px;
+    }
     .month-cal {
       display: grid;
-      grid-template-columns: repeat(7, 1fr);
-      gap: 4px;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 3px;
       margin-bottom: 10px;
     }
     .month-cal .hd {
-      text-align: center; font-size: 11px; color: var(--muted); padding: 2px 0;
+      text-align: center; font-size: 10px; color: var(--muted); padding: 0;
     }
     .month-cal button {
-      border: 1px solid var(--line); background: #fff; border-radius: 6px;
-      padding: 6px 2px; cursor: pointer; font: inherit; font-size: 11px;
-      line-height: 1.2;
+      border: 1px solid var(--line); background: #fff; border-radius: 5px;
+      padding: 4px 0; cursor: pointer; font: inherit; font-size: 10px;
+      line-height: 1.15; min-width: 0; width: 100%;
     }
-    .month-cal button .d { font-weight: 700; display: block; }
-    .month-cal button .r { color: var(--muted); font-size: 10px; }
+    .month-cal button .d { font-weight: 700; display: block; font-size: 11px; }
+    .month-cal button .r { color: var(--muted); font-size: 9px; }
     .month-cal button.on {
       background: var(--accent); color: #fff; border-color: var(--accent);
     }
     .month-cal button.on .r { color: rgba(255,255,255,0.85); }
     .month-cal button.short:not(.on) { border-color: #e8a0a0; }
     .month-title {
-      font-weight: 700; font-size: 13px; margin-bottom: 6px;
+      font-weight: 700; font-size: 12px; margin-bottom: 6px;
     }
 
     .staff-edit-row {
@@ -199,17 +217,6 @@
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #c4c9d2; display: inline-block; }
     .leave-mark { color: var(--leave); font-weight: 700; }
 
-    .layout {
-      display: grid;
-      grid-template-columns: 280px 1fr;
-      gap: 12px;
-      padding: 12px 16px 24px;
-      align-items: start;
-    }
-    @media (max-width: 1100px) {
-      .layout { grid-template-columns: 1fr; }
-    }
-
     .cal-wrap {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -252,12 +259,53 @@
       position: sticky; left: 0; z-index: 2;
       background: #fff;
       text-align: left;
-      padding: 4px 8px;
-      min-width: 108px;
-      max-width: 128px;
+      padding: 4px 6px;
+      min-width: 76px;
+      max-width: 92px;
       border-right: 1px solid var(--line);
     }
     .cal thead .sticky-name { z-index: 4; background: #fafafa; }
+    .cal .sticky-name .name-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 4px;
+    }
+    .cal .sticky-name .name-search-btn {
+      border: 0; background: transparent; cursor: pointer; padding: 0 2px;
+      color: var(--muted); font-size: 12px; line-height: 1;
+    }
+    .cal .sticky-name .name-search-btn:hover { color: var(--accent); }
+    .cal .sticky-name .name-search-btn.on { color: var(--accent); }
+    .cal .sticky-name .name-filter {
+      width: 100%; margin-top: 4px; height: 24px; font: inherit; font-size: 11px;
+      border: 1px solid var(--line); border-radius: 4px; padding: 0 6px;
+    }
+    .cal .sticky-name .name-btn {
+      border: 0; background: transparent; padding: 0; cursor: pointer;
+      font: inherit; font-weight: 600; font-size: 12px; color: var(--ink);
+      text-align: left; width: 100%;
+    }
+    .cal .sticky-name .name-btn:hover { color: var(--accent); }
+    .cal .sticky-name.open { background: #eef3f9; }
+    .staff-pop {
+      position: fixed; z-index: 90; width: 240px;
+      background: #fff; border: 1px solid var(--line); border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(44, 51, 64, 0.16);
+      padding: 10px 12px; font-size: 12px;
+    }
+    .staff-pop[hidden] { display: none; }
+    .staff-pop .t { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+    .staff-pop .row { color: var(--muted); margin-bottom: 4px; line-height: 1.4; }
+    .staff-pop select {
+      font: inherit; width: 100%; height: 28px; margin: 6px 0 8px;
+      border: 1px solid var(--line); border-radius: 6px; padding: 0 6px;
+    }
+    .staff-pop .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+    .staff-pop .acts button {
+      font: inherit; height: 28px; border-radius: 6px; border: 1px solid var(--line);
+      padding: 0 8px; background: #fff; cursor: pointer;
+    }
+    .staff-pop .acts button.primary {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
     .cal .sticky-rest {
       position: sticky; right: 0; z-index: 2;
       background: #fafafa;
@@ -461,7 +509,7 @@
     <div class="top-row">
       <div>
         <h1>排班日历 · 整月</h1>
-        <p class="hint">09-21～10-18 整月直出。每周常规休息 4 天；调休可自动对调；晚→夜 / 夜→次日早会提示。左侧月历点日期看当日需求。</p>
+        <p class="hint">09-21～10-18 整月直出。每人月休 4 天（尽量周末休）；调休可对调；晚→夜 / 夜→次日早会提示。左侧月历点日期看当天需求。</p>
       </div>
       <div class="actions">
         <select id="fillShift"></select>
@@ -506,6 +554,8 @@
       </div>
     </div>
   </div>
+
+  <div class="staff-pop" id="staffPop" hidden></div>
 
   <div class="shift-picker" id="shiftPicker" hidden></div>
 
